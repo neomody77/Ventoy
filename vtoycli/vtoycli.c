@@ -33,6 +33,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
+#ifdef __APPLE__
+#include <sys/disk.h>
+#endif
 
 #include "vtoycli.h"
 
@@ -60,9 +63,40 @@ void ventoy_gen_preudo_uuid(void *uuid)
 UINT64 get_disk_size_in_byte(const char *disk)
 {
     int fd;
-    int rc;
-    const char *pos = disk;
     unsigned long long size = 0;
+
+#ifdef __APPLE__
+    // macOS: ioctl on raw disk device. disk may be /dev/disk5 or /dev/rdisk5.
+    uint64_t block_count = 0;
+    uint32_t block_size  = 0;
+
+    fd = open(disk, O_RDONLY);
+    if (fd < 0)
+    {
+        printf("open %s failed: %s\n", disk, strerror(errno));
+        return 0;
+    }
+
+    if (ioctl(fd, DKIOCGETBLOCKCOUNT, &block_count) < 0)
+    {
+        printf("DKIOCGETBLOCKCOUNT %s failed: %s\n", disk, strerror(errno));
+        close(fd);
+        return 0;
+    }
+    if (ioctl(fd, DKIOCGETBLOCKSIZE, &block_size) < 0)
+    {
+        printf("DKIOCGETBLOCKSIZE %s failed: %s\n", disk, strerror(errno));
+        close(fd);
+        return 0;
+    }
+    close(fd);
+
+    size = (unsigned long long)block_count * (unsigned long long)block_size;
+    printf("disk %s size %llu bytes (%llu blocks * %u)\n", disk, size,
+           (unsigned long long)block_count, (unsigned)block_size);
+    return size;
+#else
+    const char *pos = disk;
     char diskpath[256] = {0};
     char sizebuf[64] = {0};
 
@@ -91,6 +125,7 @@ UINT64 get_disk_size_in_byte(const char *disk)
 
     printf("disk %s size %llu bytes\n", disk, (unsigned long long)size);
     return size;
+#endif
 }
 
 
