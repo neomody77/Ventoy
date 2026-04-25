@@ -151,17 +151,29 @@ compute_partition_layout() {
     PART2_END=$((PART2_START + VENTOY_SECTOR_NUM - 1))
 }
 
+# ---- MBR partition type byte for the data partition ----
+get_part1_type() {
+    case "$VTOY_FS" in
+        exfat|ntfs) echo 0x07 ;;
+        fat32)      echo 0x0c ;;  # FAT32 LBA — required for macOS auto-mount
+        *)          echo 0x07 ;;
+    esac
+}
+
 # ---- Write combined MBR sector 0: bootstrap (0..445) + partition table (446..509) + 0x55AA ----
 #      On macOS, raw-device writes must be sector-aligned. We build the full
 #      512-byte MBR in memory (446 bytes of Ventoy's boot.img + our partition
 #      entries) and write it as a single sector.
 write_mbr_sector() {
     local rdev="$1"
-    info "writing MBR sector (boot.img bootstrap + partition table) to $rdev ..."
-    python3 - "$rdev" "$BOOT_IMG" "$PART1_START" "$PART1_END" "$PART2_START" "$PART2_END" <<'PY'
+    local p1type
+    p1type=$(get_part1_type)
+    info "writing MBR sector (boot.img bootstrap + partition table, P1 type=$p1type) to $rdev ..."
+    python3 - "$rdev" "$BOOT_IMG" "$PART1_START" "$PART1_END" "$PART2_START" "$PART2_END" "$p1type" <<'PY'
 import os, struct, sys
 rdev, boot_img = sys.argv[1], sys.argv[2]
-p1s, p1e, p2s, p2e = map(int, sys.argv[3:])
+p1s, p1e, p2s, p2e = map(int, sys.argv[3:7])
+p1_type = int(sys.argv[7], 0)  # accepts 0x07 / 0x0c
 
 # Build sector 0 from scratch — never read from rdev (macOS raw-device caching
 # can corrupt read-modify-write on a fresh device).
@@ -194,7 +206,7 @@ def entry(boot, typ, start, end):
     )
 
 table = (
-    entry(0x80, 0x07, p1s, p1e)    # P1: exFAT/NTFS (boot flag set)
+    entry(0x80, p1_type, p1s, p1e) # P1 (boot flag set): 0x07 exFAT/NTFS, 0x0c FAT32 LBA
     + entry(0x00, 0xEF, p2s, p2e)  # P2: FAT16 EFI
     + b"\x00" * 32
 )
@@ -241,12 +253,16 @@ write_vtoyefi_image() {
 # ---- Format partition 1 (data) ----
 format_part1() {
     local part1="$1"
+    # Wipe first 4MiB so any residual exFAT/NTFS magic doesn't trick newfs
+    # or macOS auto-mount into thinking the old fs is still there.
+    info "wiping first 4MiB of $part1 ..."
+    dd if=/dev/zero of="$part1" bs=1m count=4 conv=sync 2>/dev/null || true
     if [ "$VTOY_FS" = "exfat" ]; then
         info "creating exFAT on $part1 ..."
-        newfs_exfat -v Ventoy "$part1" > /dev/null
+        newfs_exfat -v Ventoy "$part1"
     elif [ "$VTOY_FS" = "fat32" ]; then
         info "creating FAT32 on $part1 ..."
-        newfs_msdos -F 32 -v Ventoy "$part1" > /dev/null
+        newfs_msdos -F 32 -v VENTOY "$part1"
     else
         die "unsupported VTOY_FS=$VTOY_FS"
     fi
