@@ -102,14 +102,23 @@ wait_for_usb_disk_ready() {
     while [ -n "Y" ]; do
         usb_disk=$(get_ventoy_disk_name)
         vtlog "wait_for_usb_disk_ready $usb_disk ..."
-        
+
         if echo $usb_disk | $EGREP -q "nvme|mmc|nbd"; then
+            vtpart1=${usb_disk}p1
             vtpart2=${usb_disk}p2
         else
+            vtpart1=${usb_disk}1
             vtpart2=${usb_disk}2
         fi
-        
-        if [ -e "${vtpart2}" ]; then
+
+        # Wait for BOTH partitions: USB-storage / UAS enumerate the device
+        # node and partition table asynchronously. If we only check vtpart2 we
+        # can race with udev firing the dmsetup hook against vtpart1 before
+        # the kernel has fully opened it, producing a transient
+        # "can't open block dev" warning at boot. Checking both nodes _and_
+        # confirming a sector can actually be read closes the gap.
+        if [ -e "${vtpart1}" ] && [ -e "${vtpart2}" ] && \
+           $BUSYBOX_PATH/dd if="${vtpart1}" of=/dev/null bs=512 count=1 2>/dev/null; then
             vtlog "wait_for_usb_disk_ready $usb_disk finish"
             break
         else
@@ -244,7 +253,21 @@ ventoy_check_dm_module() {
 
 create_ventoy_device_mapper() {
     vtlog "create_ventoy_device_mapper $*"
-    
+
+    # Defensive: even though wait_for_usb_disk_ready should have run, the
+    # udev path can fire this hook before the partition node is openable.
+    # Block here briefly until $1 is actually readable (max ~6s).
+    vt_wait=0
+    while [ $vt_wait -lt 60 ]; do
+        if [ -b "$1" ] && \
+           $BUSYBOX_PATH/dd if="$1" of=/dev/null bs=512 count=1 2>/dev/null; then
+            break
+        fi
+        $SLEEP 0.1
+        let vt_wait=vt_wait+1
+    done
+    vtlog "create_ventoy_device_mapper wait $vt_wait ticks for $1"
+
     VT_DM_BIN=$(ventoy_find_bin_path dmsetup)
     if [ -z "$VT_DM_BIN" ]; then
         vtlog "no dmsetup avaliable, lastly try inbox dmsetup"
